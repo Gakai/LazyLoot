@@ -109,8 +109,7 @@ internal static class Roller
     {
         var lootItem = Svc.Data.GetExcelSheet<Item>().GetRow(loot.ItemId);
 
-        uint orchId = 0;
-        UpdateFadedCopy(loot.ItemId, out orchId);
+        UpdateFadedCopy(loot.ItemId, out var orchId);
 
         if (lootItem == null)
         {
@@ -127,7 +126,27 @@ internal static class Roller
             return RollResult.Passed;
         }
 
-        if (orchId != 0 ? IsItemUnlocked(orchId) : IsItemUnlocked(loot.ItemId))
+        if (orchId.Count > 0 && orchId.All(x => IsItemUnlocked(x)))
+        {
+            if (LazyLoot.Config.RestrictionIgnoreItemUnlocked)
+            {
+                if (LazyLoot.Config.DiagnosticsMode)
+                    DuoLog.Debug($@"{lootItem.Name.RawString} has been passed due to being unlocked and you have ""Pass on all items already unlocked"" enabled. [Pass All Unlocked]");
+
+                return RollResult.Passed;
+            }
+
+            if (LazyLoot.Config.RestrictionIgnoreFadedCopy
+                && lootItem.FilterGroup == 12 && lootItem.ItemUICategory.Row == 94)
+            {
+                if (LazyLoot.Config.DiagnosticsMode)
+                    DuoLog.Debug($@"{lootItem.Name.RawString} has been passed due to being unlocked and you have ""Pass on unlocked Faded Copies"" enabled. [Pass Faded Copies]");
+
+                return RollResult.Passed;
+            }
+        }
+
+        if (IsItemUnlocked(loot.ItemId))
         {
             if (LazyLoot.Config.RestrictionIgnoreItemUnlocked)
             {
@@ -188,14 +207,20 @@ internal static class Roller
 
                 return RollResult.Passed;
             }
+        }
 
-            if (LazyLoot.Config.RestrictionIgnoreFadedCopy
-                && lootItem.Icon == 25958)
+        if (LazyLoot.Config.RestrictionSeals)
+        {
+            if (lootItem.Rarity > 1 && lootItem.PriceLow > 0 && lootItem.ClassJobCategory.Row > 0)
             {
-                if (LazyLoot.Config.DiagnosticsMode)
-                    DuoLog.Debug($@"{lootItem.Name.RawString} has been passed due to being unlocked and you have ""Pass on unlocked Faded Copies"" enabled. [Pass Faded Copies]");
+                var gcSealValue = Svc.Data.Excel.GetSheet<GCSupplyDutyReward>()?.GetRow(lootItem.LevelItem.Row).SealsExpertDelivery;
+                if (gcSealValue < LazyLoot.Config.RestrictionSealsAmnt)
+                {
+                    if (LazyLoot.Config.DiagnosticsMode)
+                        DuoLog.Debug($@"{lootItem.Name.RawString} has been passed due to selling for less than {LazyLoot.Config.RestrictionSealsAmnt} seals. [Pass Seals]");
 
-                return RollResult.Passed;
+                    return RollResult.Passed;
+                }
             }
         }
 
@@ -271,8 +296,9 @@ internal static class Roller
         return RollResult.Needed;
     }
 
-    public static void UpdateFadedCopy(uint itemId, out uint orchId)
+    public static void UpdateFadedCopy(uint itemId, out List<uint> orchId)
     {
+        orchId = new();
         var lumina = Svc.Data.GetExcelSheet<Item>().GetRow(itemId);
         if (lumina != null)
         {
@@ -281,15 +307,14 @@ internal static class Roller
                 var recipe = Svc.Data.GetExcelSheet<Recipe>()?.Where(x => x.UnkData5.Any(y => y.ItemIngredient == lumina.RowId)).Select(x => x.ItemResult.Value).FirstOrDefault();
                 if (recipe != null)
                 {
-                    Svc.Log.Debug($"Updating Faded Copy {itemId} to Non-Faded {recipe.RowId}");
-                    orchId = recipe.RowId;
+                    if (LazyLoot.Config.DiagnosticsMode)
+                        DuoLog.Debug($"Updating Faded Copy {lumina.Name} ({itemId}) to Non-Faded {recipe.Name} ({recipe.RowId})");
+                    orchId.Add(recipe.RowId);
                     return;
                 }
-                
+
             }
         }
-
-        orchId = 0;
     }
 
     private static RollResult ResultMerge(params RollResult[] results)
@@ -307,6 +332,7 @@ internal static class Roller
         for (i = 0; i < span.Length; i++)
         {
             loot = span[(int)i];
+            if (loot.ItemId >= 1000000) loot.ItemId -= 1000000;
             if (loot.ChestObjectId is 0 or GameObject.InvalidGameObjectId) continue;
             if ((RollResult)loot.RollResult != RollResult.UnAwarded) continue;
             if (loot.RollState is RollState.Rolled or RollState.Unavailable or RollState.Unknown) continue;
@@ -359,20 +385,27 @@ internal static class Roller
         }
     }
 
-    private static unsafe int ItemCount(uint itemId)
+    public static unsafe int ItemCount(uint itemId)
         => InventoryManager.Instance()->GetInventoryItemCount(itemId);
 
-    private static unsafe bool IsItemUnlocked(uint itemId)
+    public static unsafe bool IsItemUnlocked(uint itemId)
     {
-        try
+        var exdItem = ExdModule.GetItemRowById(itemId);
+        return exdItem is null || UIState.Instance()->IsItemActionUnlocked(exdItem) is 1;
+    }
+
+    public static uint ConvertSealsToIlvl(int sealAmnt)
+    {
+        var sealsSheet = Svc.Data.GetExcelSheet<GCSupplyDutyReward>();
+        uint ilvl = 0;
+        foreach (var row in sealsSheet)
         {
-            return UIState.Instance()->IsItemActionUnlocked(ExdModule.GetItemRowById(itemId)) == 1;
+            if (row.SealsExpertDelivery < sealAmnt)
+            {
+                ilvl = row.RowId;
+            }
         }
-        catch (Exception ex)
-        {
-            PluginLog.Warning(ex, $"Exception in IsItemActionUnlocked for itemId {itemId}");
-            // Return true to avoid infinite loop
-            return true;
-        }
+
+        return ilvl;
     }
 }
